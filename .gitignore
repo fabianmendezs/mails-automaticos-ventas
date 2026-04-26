@@ -1,0 +1,26 @@
+# Entorno virtual
+venv/
+.venv/
+env/
+
+# Credenciales (NUNCA subir al repositorio)
+.env
+
+# Logs
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# VS Code
+*.code-workspace
+.vscode/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -25,11 +25,21 @@ EXCEL_PATH = BASE_DIR / os.getenv("EXCEL_FILE", "Prueba_envio_de_mails.xlsx")
 HTML_PATH  = BASE_DIR / os.getenv("HTML_FILE",  "reporte_ventas_vendedor.html")
 META       = int(os.getenv("META", 100_000))
 
-SMTP_HOST  = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT  = int(os.getenv("SMTP_PORT", 587))
-SMTP_USER  = os.getenv("SMTP_USER")
-SMTP_PASS  = os.getenv("SMTP_PASS")
-REMITENTE  = os.getenv("REMITENTE", f"Reportes de Venta <{SMTP_USER}>")
+SMTP_HOST    = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT    = int(os.getenv("SMTP_PORT", 587))
+SMTP_TIMEOUT = int(os.getenv("SMTP_TIMEOUT", 30))  # segundos
+SMTP_USER    = os.getenv("SMTP_USER")
+SMTP_PASS    = os.getenv("SMTP_PASS")
+REMITENTE    = os.getenv("REMITENTE", f"Reportes de Venta <{SMTP_USER}>")
+
+# ─── VALIDACIÓN DE VARIABLES DE ENTORNO ───────────────────────────────────────
+
+_required = {"SMTP_USER": SMTP_USER, "SMTP_PASS": SMTP_PASS}
+_missing  = [k for k, v in _required.items() if not v]
+if _missing:
+    print(f"\nERROR: Variables de entorno requeridas no encontradas: {', '.join(_missing)}")
+    print("Crea un archivo .env basándote en .env.example y completa los valores.\n")
+    sys.exit(1)
 
 # ─── 1. LEER DATOS ────────────────────────────────────────────────────────────
 
@@ -78,9 +88,9 @@ def crear_excel_vendedor(df_det: pd.DataFrame, nombre: str) -> bytes:
         ("Monto",    18, "monto",  right_align),
     ]
 
-    # Título
+    # Titulo
     ws.merge_cells("A1:D1")
-    ws["A1"] = f"Detalle de Ventas — {nombre}  |  {fecha_min} al {fecha_max}"
+    ws["A1"] = f"Detalle de Ventas - {nombre}  |  {fecha_min} al {fecha_max}"
     ws["A1"].font      = Font(name="Arial", bold=True, size=12, color="0F172A")
     ws["A1"].alignment = left_align
     ws.row_dimensions[1].height = 22
@@ -152,18 +162,55 @@ def render_html(nombre: str, total: int, meta: int, periodo: str) -> str:
     )
     return html
 
-# ─── 6. FUNCIÓN: ENVIAR MAIL ──────────────────────────────────────────────────
+# ─── 6. FUNCIÓN: GENERAR TEXTO PLANO POR VENDEDOR ─────────────────────────────
 
-def enviar_mail(destinatario: str, nombre: str, html_body: str,
+def render_plain(nombre: str, total: int, meta: int, periodo: str) -> str:
+    """
+    Alternativa en texto plano al HTML del email.
+    Requerido para evitar que el mensaje vaya a spam (emails solo-HTML
+    son penalizados por Gmail y otros clientes).
+    """
+    avance = total / meta * 100
+    lineas = [
+        f"Reporte de Ventas | {nombre} | {periodo}",
+        "=" * 45,
+        "",
+        f"Total vendido:  ${total:,.0f}".replace(",", "."),
+        f"Meta:           ${meta:,.0f}".replace(",", "."),
+        f"Avance:         {avance:.1f}%".replace(".", ","),
+        "",
+        "Se adjunta el detalle de transacciones en formato Excel.",
+        "",
+        "--",
+        "Reporte generado automaticamente.",
+        "Para darse de baja responda con el asunto: BAJA.",
+    ]
+    return "\n".join(lineas)
+
+# ─── 7. FUNCIÓN: ENVIAR MAIL ──────────────────────────────────────────────────
+
+def enviar_mail(destinatario: str, nombre: str, html_body: str, plain_body: str,
                 excel_bytes: bytes, smtp: smtplib.SMTP) -> None:
-
+    """
+    Estructura MIME correcta para HTML + texto plano + adjunto:
+      mixed
+      ├── alternative
+      │   ├── text/plain   (fallback)
+      │   └── text/html    (preferido)
+      └── xlsx (adjunto)
+    """
     msg = MIMEMultipart("mixed")
     msg["From"]    = REMITENTE
     msg["To"]      = destinatario
-    msg["Subject"] = f"Reporte de Ventas — {nombre} — {fecha_max}"
+    msg["Subject"] = f"[Reporte Ventas] {nombre} | {fecha_max}"
 
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
+    # Parte alternativa: texto plano + HTML
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(plain_body, "plain", "utf-8"))
+    alt.attach(MIMEText(html_body,  "html",  "utf-8"))
+    msg.attach(alt)
 
+    # Adjunto Excel
     adjunto = MIMEBase("application",
                        "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     adjunto.set_payload(excel_bytes)
@@ -174,39 +221,40 @@ def enviar_mail(destinatario: str, nombre: str, html_body: str,
 
     smtp.sendmail(SMTP_USER, destinatario, msg.as_string())
 
-# ─── 7. LOOP PRINCIPAL ────────────────────────────────────────────────────────
+# ─── 8. LOOP PRINCIPAL ────────────────────────────────────────────────────────
 
 print(f"\n{'─'*55}")
-print(f"  Inicio envío: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-print(f"  Período: {fecha_min} → {fecha_max}")
+print(f"  Inicio envio: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+print(f"  Periodo: {fecha_min} -> {fecha_max}")
 print(f"  Meta individual: ${META:,}")
 print(f"{'-'*55}\n")
 
-with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as smtp:
+with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT) as smtp:
     smtp.ehlo()
     smtp.starttls()
     smtp.login(SMTP_USER, SMTP_PASS)
 
     for _, row_mail in df_mails.iterrows():
-        cod     = row_mail["Vendedor"]
-        nombre  = row_mail["Nombre Vendedor"]
-        email   = row_mail["Mails"]
+        cod    = row_mail["Vendedor"]
+        nombre = row_mail["Nombre Vendedor"]
+        email  = row_mail["Mails"]
 
         df_det = df_venta[df_venta["Vendedor"] == cod].copy()
         if df_det.empty:
-            print(f"  ⚠  {nombre:<15} — sin datos, se omite")
+            print(f"  ⚠  {nombre:<15} - sin datos, se omite")
             continue
 
         total   = int(df_det["Monto"].sum())
         periodo = df_det["Fecha"].max().strftime("%B %Y").capitalize()
 
-        html_body   = render_html(nombre, total, META, periodo)
+        html_body  = render_html(nombre, total, META, periodo)
+        plain_body = render_plain(nombre, total, META, periodo)
         excel_bytes = crear_excel_vendedor(df_det, nombre)
 
         try:
-            enviar_mail(email, nombre, html_body, excel_bytes, smtp)
+            enviar_mail(email, nombre, html_body, plain_body, excel_bytes, smtp)
             avance = total / META * 100
-            print(f"  ✓  {nombre:<15}  ${total:>12,}  {avance:5.1f}%  →  {email}")
+            print(f"  ✓  {nombre:<15}  ${total:>12,}  {avance:5.1f}%  ->  {email}")
         except Exception as e:
             print(f"  ✗  {nombre:<15}  ERROR: {e}")
 
